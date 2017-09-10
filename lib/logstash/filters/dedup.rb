@@ -28,6 +28,9 @@ class LogStash::Filters::Dedup < LogStash::Filters::Base
 
   # Interval for reconnecting to failed Redis connections
   config :reconnect_interval, :validate => :number, :default => 1
+
+  # Interval for retry to failed Redis publishing
+  config :retry_interval, :validate => :number, :default => 3
   
   # Array of keys the unique key will build from.
   config :keys, :validate => :array, :required => true
@@ -49,21 +52,30 @@ class LogStash::Filters::Dedup < LogStash::Filters::Base
       if @redis.exists redis_key
 	  event.tag("_dupfailure")
       else
-	  @redis.set redis_key, Time.now.to_s
-	  @redis.expire redis_key, @ttl
+	  @redis.multi do |m|
+	    m.set redis_key, Time.now.to_s
+	    m.expire redis_key, @ttl
+	  end
       end
     rescue => e
-      @logger.warn("Failed to send event to Redis", :event => event, :key => redis_key, :exception => e, :backtrace => e.backtrace)
-      sleep @reconnect_interval
-      @redis ||= conect
-      retry
+      if e.message['LOADING']
+	@logger.warn("Redis 'LOADING' exception catched", :event => event, :key => redis_key, :exception => e)
+        sleep @retry_interval
+	retry
+      else
+        @logger.warn("Failed to send event to Redis", :event => event, :key => redis_key, :exception => e)
+	#:backtrace => e.backtrace
+        sleep @reconnect_interval
+        @redis ||= conect
+        retry
+      end
     end
   end # def filter
 
   private
   def connect
     @redis_url = "redis://#{@password}@#{@host}:#{@port}/#{@db}"
-    Redis.new(:url => @redis_url)
+    Redis.new(:url => @redis_url, :timeout => 10)
   end # def connect
 
 end # class LogStash::Filters::Dedup
